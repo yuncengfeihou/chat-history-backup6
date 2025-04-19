@@ -649,27 +649,6 @@ async function performManualBackup() {
 
 // --- 恢复逻辑 ---
 // index.js (内部的 restoreBackup 函数 - 审查和优化)
-// index.js
-
-// --- 确保导入必要的函数 ---
-import {
-    // ... 其他导入 ...
-    getContext,
-    saveChat,
-    characters,
-    selectCharacterById,
-    doNewChat,
-    updateChatMetadata,
-    eventSource,
-    event_types,
-    // 不需要 getChat, hide/showSwipeButtons
-} from '../../../../script.js';
-import {
-    select_group_chats, // 确保导入
-} from '../../../group-chats.js';
-
-// ... (其他代码) ...
-
 async function restoreBackup(backupData) {
     // --- 入口与基本信息提取 ---
     console.log('[聊天自动备份] 开始恢复备份:', { chatKey: backupData.chatKey, timestamp: backupData.timestamp });
