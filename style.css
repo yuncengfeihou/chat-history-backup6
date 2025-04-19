@@ -1,5 +1,17 @@
 /* 聊天自动备份插件样式 */
 
+/* 确保备份操作区域内的所有按钮文本都不换行 */
+.backup_actions .menu_button { /* 应用到恢复和删除按钮 */
+    white-space: nowrap;
+}
+
+/* 假设手动备份按钮的 ID 是 #chat_backup_manual_backup */
+/* 或者，如果它也在 .chat_backup_controls 容器内，可以更通用地选择 */
+.chat_backup_controls button { /* 应用到控制区域内的所有按钮 */
+    white-space: nowrap;
+}
+
+
 /* 备份列表容器 */
 .backup_list_container {
     margin-top: 15px;
