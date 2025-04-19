@@ -651,142 +651,198 @@ async function performManualBackup() {
 // index.js (内部的 restoreBackup 函数 - 审查和优化)
 async function restoreBackup(backupData) {
     // --- 入口与基本信息提取 ---
-    console.log('[聊天自动备份] 开始恢复备份:', { chatKey: backupData.chatKey, timestamp: backupData.timestamp });
+    console.log('[聊天自动备份 V3] 开始恢复备份:', { chatKey: backupData.chatKey, timestamp: backupData.timestamp });
     const isGroup = backupData.chatKey.startsWith('group_');
     const entityIdMatch = backupData.chatKey.match(
         isGroup
-        ? /group_(\w+)_/ // 匹配群组ID (通常是字符串)
-        : /^char_(\d+)/  // 匹配角色ID (数字索引)
+        ? /group_(\w+)_/ // 群组 ID (字符串)
+        : /^char_(\d+)/  // 角色 ID (数字索引)
     );
     let entityId = entityIdMatch ? entityIdMatch[1] : null;
 
     if (!entityId) {
-        console.error('[聊天自动备份] 无法从备份数据中提取角色/群组ID:', backupData.chatKey);
+        console.error('[聊天自动备份 V3] 无法从备份数据中提取角色/群组ID:', backupData.chatKey);
         toastr.error('无法识别备份对应的角色/群组ID');
         return false;
     }
 
-    logDebug(`恢复目标: ${isGroup ? '群组' : '角色'} ID/标识: ${entityId}`);
-    let targetCharIndex = -1; // 初始化角色索引
+    logDebug(`V3 恢复目标: ${isGroup ? '群组' : '角色'} ID/标识: ${entityId}`);
+    let targetCharIndex = -1;
+    let targetGroupName = ''; // 用于群组
 
     try {
-        // --- 步骤 1: 切换上下文 ---
-        try {
-            logDebug('步骤 1: 开始切换上下文...');
-            if (isGroup) {
-                logDebug(`切换到群组: ${entityId}`);
-                await select_group_chats(entityId); // 切换到群组
-            } else {
-                targetCharIndex = parseInt(entityId, 10); // 获取角色索引
-                if (isNaN(targetCharIndex) || targetCharIndex < 0 || targetCharIndex >= characters.length) {
-                    throw new Error(`无效的角色索引 ${targetCharIndex}`);
-                }
-                logDebug(`切换到角色索引: ${targetCharIndex}`);
-                await selectCharacterById(targetCharIndex, { switchMenu: false }); // 切换到角色
+        // --- 步骤 1: 切换上下文 (如果需要) ---
+        const currentContext = getContext();
+        let contextNeedsSwitch = true;
+        if (isGroup) {
+            if (currentContext.groupId === entityId) {
+                contextNeedsSwitch = false;
             }
-            // 等待一小段时间确保上下文切换完成 (根据需要调整)
-            await new Promise(resolve => setTimeout(resolve, 500));
-            logDebug('步骤 1: 上下文切换完成');
-        } catch (switchError) {
-            console.error('[聊天自动备份] 步骤 1 失败: 切换角色/群组失败:', switchError);
-            const errorMsg = switchError instanceof Error ? switchError.message : String(switchError);
-            toastr.error(`切换到 ${isGroup ? '群组' : '角色'} ${entityId} 失败: ${errorMsg}`);
-            return false;
+            // 获取群组名称，用于后续生成文件名
+            const group = currentContext.groups?.find(g => g.id === entityId);
+            targetGroupName = group ? group.name : `Group_${entityId.substring(0, 5)}`;
+        } else {
+            targetCharIndex = parseInt(entityId, 10);
+            if (isNaN(targetCharIndex) || targetCharIndex < 0 || targetCharIndex >= characters.length) {
+                throw new Error(`无效的角色索引 ${targetCharIndex}`);
+            }
+            if (currentContext.characterId == targetCharIndex) { // 注意比较类型
+                contextNeedsSwitch = false;
+            }
         }
 
-        // --- 步骤 2: 创建新聊天 ---
-        try {
-            logDebug('步骤 2: 开始创建新聊天...');
-            await doNewChat({ deleteCurrentChat: false }); // 创建新聊天
-             // 增加等待时间确保 doNewChat 完成其内部流程，包括可能的 getChat 和 printMessages
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            logDebug('步骤 2: 新聊天创建完成');
-        } catch (newChatError) {
-            console.error('[聊天自动备份] 步骤 2 失败: 创建新聊天失败:', newChatError);
-            toastr.error('创建新聊天失败');
-            return false;
+        if (contextNeedsSwitch) {
+            try {
+                logDebug('步骤 1: 开始切换上下文...');
+                if (isGroup) {
+                    logDebug(`切换到群组: ${entityId}`);
+                    await select_group_chats(entityId);
+                } else {
+                    logDebug(`切换到角色索引: ${targetCharIndex}`);
+                    await selectCharacterById(targetCharIndex, { switchMenu: false });
+                }
+                await new Promise(resolve => setTimeout(resolve, 500)); // 等待状态更新
+                logDebug('步骤 1: 上下文切换完成');
+            } catch (switchError) {
+                console.error('[聊天自动备份 V3] 步骤 1 失败: 切换角色/群组失败:', switchError);
+                const errorMsg = switchError instanceof Error ? switchError.message : String(switchError);
+                toastr.error(`切换到 ${isGroup ? '群组' : '角色'} ${entityId} 失败: ${errorMsg}`);
+                return false;
+            }
+        } else {
+            logDebug('步骤 1: 目标上下文已是当前上下文，跳过切换');
         }
 
-        // --- 步骤 3: 获取新上下文并准备恢复 ---
-        logDebug('步骤 3: 获取新上下文并准备恢复...');
-        let currentContext = getContext(); // 获取最新的上下文信息
-        const newChatId = currentContext.chatId; // 获取新聊天的 ID
-        if (!newChatId) {
-            console.error('[聊天自动备份] 步骤 3 失败: 创建新聊天后未能获取到有效的 chatId');
-            toastr.error('未能获取新聊天的ID，无法继续恢复');
-            return false;
-        }
-        logDebug(`步骤 3: 新聊天ID: ${newChatId}`);
+        // --- 步骤 2: 生成新聊天文件名 ---
+        logDebug('步骤 2: 生成新聊天文件名...');
+        const backupDate = new Date(backupData.timestamp);
+        const dateString = backupDate.toISOString().slice(0, 19).replace('T', '_').replace(/:/g, '-');
+        const entityNameForFile = isGroup ? targetGroupName : (characters[targetCharIndex]?.name || `Char_${targetCharIndex}`);
+        // 清理可能存在于名称中的非法字符
+        const safeEntityName = entityNameForFile.replace(/[<>:"/\\|?*]/g, '_').substring(0, 50);
+        const newChatFileName = `恢复_${safeEntityName}_${dateString}`;
+        logDebug(`步骤 2: 生成的新聊天文件名: ${newChatFileName}`);
 
-        // --- 步骤 4: 填充聊天内容和元数据 (在内存中，不直接操作 UI) ---
-        logDebug('步骤 4: 开始填充内存中的聊天内容和元数据...');
-        currentContext.chat.length = 0; // 清空由 doNewChat 可能产生的默认消息
-        const copiedChatData = structuredClone(backupData.chat);
-        copiedChatData.forEach(msg => currentContext.chat.push(msg)); // 填充备份的聊天记录
-
+        // --- 步骤 3: 准备要保存的数据 ---
+        logDebug('步骤 3: 准备要保存的数据...');
         let finalMetadata = {};
         if (backupData.metadata && typeof backupData.metadata === 'object' && backupData.metadata !== null) {
             try {
                 const restoredMetadata = structuredClone(backupData.metadata);
-                delete restoredMetadata.integrity; // 清理不应恢复的元数据
-                // delete restoredMetadata.create_date; // create_date 应该由新聊天生成
+                delete restoredMetadata.integrity;
+                // create_date 应该由新的保存操作生成或由后端处理，不从备份恢复
+                // delete restoredMetadata.create_date;
                 finalMetadata = restoredMetadata;
             } catch (cloneError) {
-                console.warn('[聊天自动备份] 步骤 4 警告: 克隆备份元数据失败，将使用空元数据:', cloneError);
+                console.warn('[聊天自动备份 V3] 步骤 3 警告: 克隆备份元数据失败:', cloneError);
             }
         }
-        // 注意：这里我们暂时不调用 updateChatMetadata，因为 saveChat 会包含元数据
-        logDebug(`步骤 4: 内存填充完成, 消息数: ${currentContext.chat.length}, 元数据准备完毕:`, finalMetadata);
 
+        const copiedChatData = structuredClone(backupData.chat);
+        // 构建符合 saveChat API 的数据结构
+        const chatToSaveForApi = [
+            {
+                // 对于角色，这些会在 saveChat 内部根据上下文补充或覆盖
+                // 对于群组，这些可能不适用或由 saveGroupChat 处理 (但我们用 saveChat)
+                // 关键是传递 chat_metadata
+                chat_metadata: finalMetadata,
+                // 添加 create_date 让格式更完整，即使后端可能覆盖它
+                create_date: new Date().toISOString(),
+            },
+            ...copiedChatData,
+        ];
+        logDebug(`步骤 3: 数据准备完成, 消息数: ${copiedChatData.length}, 元数据:`, finalMetadata);
 
-        // --- 步骤 5: 保存恢复的数据到新聊天文件 ---
-        logDebug(`步骤 5: 即将调用 saveChat 保存恢复的数据到新聊天文件: ${newChatId}...`);
+        // --- 步骤 4: 调用 saveChat 保存到新文件 ---
+        logDebug(`步骤 4: 调用 saveChat 保存到新文件 ${newChatFileName}...`);
         try {
-            // 使用 saveChat 将内存中的 chat 和 metadata 保存到服务器/存储
-            // 关键：传入 chatName (即 newChatId) 和元数据
-            await saveChat({ chatName: newChatId, withMetadata: finalMetadata, force: true });
-            logDebug('步骤 5: saveChat 调用完成');
+            // 获取保存所需的上下文信息
+            const saveContext = getContext();
+            const characterNameForSave = saveContext.name2 || (characters[targetCharIndex]?.name); // 确保有角色名
+            const avatarUrlForSave = saveContext.characterAvatarUrl || characters[targetCharIndex]?.avatar; // 确保有头像
+
+            if (!isGroup && (!characterNameForSave || !avatarUrlForSave)) {
+                 throw new Error('无法获取保存角色聊天所需的名称或头像URL');
+            }
+
+            // 注意：目前 script.js 的 saveChat 主要设计用于角色聊天。
+            // 保存群组聊天通常走 saveGroupChat。
+            // 这里我们尝试用 saveChat 保存，如果后端能正确处理（基于文件名或元数据判断），则可行。
+            // 如果不行，则需要更复杂的处理（可能需要调用 saveGroupChat，但这未导出）。
+            // 暂时先用 saveChat 尝试，并依赖 force: true。
+
+            const savePayload = {
+                // ch_name 和 avatar_url 主要用于角色聊天的路径查找和权限，对群组可能不严格要求
+                ch_name: isGroup ? "恢复的群组" : characterNameForSave,
+                avatar_url: isGroup ? "group_avatar" : avatarUrlForSave, // 群组用占位符
+                file_name: newChatFileName, // 指定要保存到的新文件名
+                chat: chatToSaveForApi,     // 包含元数据头的完整聊天数组
+                force: true,                // 强制保存
+                is_group: isGroup,          // 明确告知是群组（如果后端支持此标志）
+            };
+            logDebug('saveChat 请求体:', savePayload);
+
+            const response = await fetch('/api/chats/save', {
+                method: 'POST',
+                cache: 'no-cache',
+                headers: getContext().getRequestHeaders(), // 使用 getContext 获取 headers
+                body: JSON.stringify(savePayload),
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({ error: '无法解析错误响应' }));
+                console.error('保存聊天失败，响应:', response.status, errorData);
+                throw new Error(`保存聊天失败: ${response.status} ${errorData.error || response.statusText}`);
+            }
+
+            logDebug('步骤 4: saveChat 调用成功完成');
+
         } catch (saveError) {
-            console.error("[聊天自动备份] 步骤 5 失败: saveChat 调用时出错:", saveError);
-            toastr.error(`保存恢复的聊天失败: ${saveError.message}`, '聊天自动备份');
+            console.error("[聊天自动备份 V3] 步骤 4 失败: saveChat 调用时出错:", saveError);
+            toastr.error(`保存恢复的聊天到新文件失败: ${saveError.message}`, '聊天自动备份');
             return false;
         }
 
-        // --- 步骤 6: 重新加载当前聊天上下文以触发正确渲染 ---
-        logDebug('步骤 6: 重新选择当前聊天以强制刷新UI和状态...');
+        // --- 步骤 5: 触发 SillyTavern 加载新保存的聊天 ---
+        logDebug('步骤 5: 触发 SillyTavern 加载新保存的聊天...');
         try {
             if (isGroup) {
-                logDebug(`重新选择群组: ${entityId}`);
-                await select_group_chats(entityId); // 重新选择群组
+                logDebug(`更新群组 ${entityId} 的 chat_id 为 ${newChatFileName} 并重新选择`);
+                // 1. 更新内存中的群组数据 (如果 groups 数组可访问且允许修改)
+                const groups = getContext().groups; // 假设 getContext 能拿到 groups
+                const groupIndex = groups?.findIndex(g => g.id === entityId);
+                if (groups && groupIndex !== -1) {
+                    groups[groupIndex].chat_id = newChatFileName;
+                    logDebug(`内存中群组 ${entityId} 的 chat_id 已更新`);
+                    // 可能还需要触发保存群组列表的操作，但这通常与 editGroup 关联，比较复杂
+                    // 尝试直接重新选择，看 getGroupChat 是否会读取更新后的 chat_id
+                } else {
+                    console.warn(`未能找到群组 ${entityId} 来更新其内存中的 chat_id`);
+                }
+                // 2. 重新选择群组，期望它加载新的 chat_id
+                await select_group_chats(entityId); // 这会触发 getGroupChat
             } else if (targetCharIndex !== -1) {
-                logDebug(`重新选择角色索引: ${targetCharIndex}`);
-                // 重新选择角色会触发 getChat -> printMessages 流程
-                await selectCharacterById(targetCharIndex, { switchMenu: false });
+                logDebug(`调用 openCharacterChat 加载新聊天文件: ${newChatFileName}`);
+                // openCharacterChat 会设置角色的 chat 属性并调用 getChat
+                await openCharacterChat(newChatFileName);
             }
-            // 等待重新加载和渲染完成
-            await new Promise(resolve => setTimeout(resolve, 800));
-            logDebug('步骤 6: 重新选择和UI刷新完成');
-        } catch (reselectError) {
-            console.error('[聊天自动备份] 步骤 6 失败: 重新选择上下文失败:', reselectError);
-            toastr.error('重新加载恢复的聊天内容失败，请尝试手动切换聊天。');
-            // 即使重新选择失败，数据已保存，流程可以认为部分成功
+            // 给加载和渲染留出时间
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            logDebug('步骤 5: 加载新聊天的请求已发出');
+        } catch (loadError) {
+            console.error('[聊天自动备份 V3] 步骤 5 失败: 触发加载新聊天失败:', loadError);
+            toastr.error('已保存恢复数据，但自动加载新聊天失败，请手动切换。');
+            // 即使加载失败，数据已保存，也算部分成功
         }
 
-        // --- 步骤 7: 触发事件 (可选但推荐) ---
-        // 此时 SillyTavern 应该已经加载并渲染了正确的聊天
-        // 触发 CHAT_CHANGED 可能有助于其他依赖此事件的插件或逻辑
-        logDebug('步骤 7: 触发 CHAT_CHANGED 事件...');
-        const finalContext = getContext();
-        eventSource.emit(event_types.CHAT_CHANGED, finalContext.chatId);
-
         // --- 结束 ---
-        console.log('[聊天自动备份] 恢复流程完成');
-        toastr.success('聊天记录已成功恢复到新聊天'); // 放在最后，表示整个流程（包括UI刷新）成功
+        console.log('[聊天自动备份 V3] 恢复流程完成 (数据已保存，已尝试触发加载)');
+        toastr.success('聊天记录已恢复并保存到新聊天，正在尝试加载...');
         return true;
 
     } catch (error) {
         // 捕获未预料的错误
-        console.error('[聊天自动备份] 恢复聊天过程中发生未预料的严重错误:', error);
+        console.error('[聊天自动备份 V3] 恢复聊天过程中发生未预料的严重错误:', error);
         toastr.error(`恢复失败: ${error.message || '未知错误'}`, '聊天自动备份');
         return false;
     }
