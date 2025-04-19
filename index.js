@@ -851,7 +851,7 @@ async function updateBackupsList() {
                             <span class="backup_mesid">消息数: ${backup.lastMessageId + 1}</span>
                             <span class="backup_date">${formattedDate}</span>
                         </div>
-                        <div class="backup_preview" title="${backup.lastMessagePreview}">预览: ${backup.lastMessagePreview}...</div>
+                        <div class="backup_preview" title="${backup.lastMessagePreview}">${backup.lastMessagePreview}...</div>
                     </div>
                     <div class="backup_actions">
                         <button class="menu_button backup_restore" title="恢复此备份到新聊天" data-timestamp="${backup.timestamp}" data-key="${backup.chatKey}">恢复</button>
