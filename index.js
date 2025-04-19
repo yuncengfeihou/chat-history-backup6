@@ -649,6 +649,27 @@ async function performManualBackup() {
 
 // --- 恢复逻辑 ---
 // index.js (内部的 restoreBackup 函数 - 审查和优化)
+// index.js
+
+// --- 确保导入必要的函数 ---
+import {
+    // ... 其他导入 ...
+    getContext,
+    saveChat,
+    characters,
+    selectCharacterById,
+    doNewChat,
+    updateChatMetadata,
+    eventSource,
+    event_types,
+    // 不需要 getChat, hide/showSwipeButtons
+} from '../../../../script.js';
+import {
+    select_group_chats, // 确保导入
+} from '../../../group-chats.js';
+
+// ... (其他代码) ...
+
 async function restoreBackup(backupData) {
     // --- 入口与基本信息提取 ---
     console.log('[聊天自动备份] 开始恢复备份:', { chatKey: backupData.chatKey, timestamp: backupData.timestamp });
@@ -659,6 +680,7 @@ async function restoreBackup(backupData) {
         : /^char_(\d+)/  // 匹配角色ID (索引)
     );
     let entityId = entityIdMatch ? entityIdMatch[1] : null;
+    let targetCharIndex = -1; // 保存角色索引，以便稍后切回
 
     if (!entityId) {
         console.error('[聊天自动备份] 无法从备份数据中提取角色/群组ID:', backupData.chatKey);
@@ -667,43 +689,57 @@ async function restoreBackup(backupData) {
     }
 
     logDebug(`恢复目标: ${isGroup ? '群组' : '角色'} ID/标识: ${entityId}`);
-    let targetCharIndex = -1;
+
+    // *** 保存当前选中的实体 ID 和类型，以便最后切回 ***
+    const entityToRestore = {
+        isGroup: isGroup,
+        id: entityId,
+        charIndex: -1 // 初始化
+    };
+    if (!isGroup) {
+        entityToRestore.charIndex = parseInt(entityId, 10);
+        if (isNaN(entityToRestore.charIndex) || entityToRestore.charIndex < 0 || entityToRestore.charIndex >= characters.length) {
+             console.error(`[聊天自动备份] 角色索引无效: ${entityId}`);
+             toastr.error(`无效的角色索引 ${entityId}`);
+             return false;
+        }
+    }
 
     try {
-        // --- 步骤 1: 切换上下文 ---
-        // (保持不变)
-        try {
-            logDebug('步骤 1: 开始切换上下文...');
-            if (isGroup) {
-                logDebug(`切换到群组: ${entityId}`);
-                await select_group_chats(entityId);
-            } else {
-                targetCharIndex = parseInt(entityId, 10);
-                if (isNaN(targetCharIndex) || targetCharIndex < 0 || targetCharIndex >= characters.length) {
-                    throw new Error(`无效的角色索引 ${targetCharIndex}`);
+        // --- 步骤 1: 切换上下文 --- (如果当前不是目标，则切换；如果已经是，则跳过)
+        const initialContext = getContext();
+        const needsContextSwitch = (isGroup && initialContext.groupId !== entityId) ||
+                                   (!isGroup && String(initialContext.characterId) !== entityId);
+
+        if (needsContextSwitch) {
+            try {
+                logDebug('步骤 1: 需要切换上下文，开始切换...');
+                if (isGroup) {
+                    await select_group_chats(entityId);
+                } else {
+                    await selectCharacterById(entityToRestore.charIndex, { switchMenu: false });
                 }
-                logDebug(`切换到角色索引: ${targetCharIndex}`);
-                await selectCharacterById(targetCharIndex, { switchMenu: false });
+                await new Promise(resolve => setTimeout(resolve, 500)); // 等待切换完成
+                logDebug('步骤 1: 上下文切换完成');
+            } catch (switchError) {
+                console.error('[聊天自动备份] 步骤 1 失败: 切换角色/群组失败:', switchError);
+                toastr.error(`切换上下文失败: ${switchError.message || switchError}`);
+                return false;
             }
-            await new Promise(resolve => setTimeout(resolve, 500)); // 等待状态更新
-            logDebug('步骤 1: 上下文切换完成');
-        } catch (switchError) {
-            console.error('[聊天自动备份] 步骤 1 失败: 切换角色/群组失败:', switchError);
-            toastr.error(`切换上下文失败: ${switchError.message || switchError}`);
-            return false;
+        } else {
+            logDebug('步骤 1: 当前已在目标上下文，跳过切换');
         }
 
+
         // --- 步骤 2: 创建新聊天 ---
-        // (保持不变)
         let originalChatIdBeforeNewChat = getContext().chatId;
         logDebug('步骤 2: 开始创建新聊天...');
         await doNewChat({ deleteCurrentChat: false });
         await new Promise(resolve => setTimeout(resolve, 1000));
         logDebug('步骤 2: 新聊天创建完成');
 
-        // --- 步骤 3: 获取新聊天 ID 和验证上下文 ---
-        // (保持不变)
-        logDebug('步骤 3: 获取新聊天 ID 和验证上下文...');
+        // --- 步骤 3: 获取新聊天 ID ---
+        logDebug('步骤 3: 获取新聊天 ID...');
         let contextAfterNewChat = getContext();
         const newChatId = contextAfterNewChat.chatId;
 
@@ -713,7 +749,7 @@ async function restoreBackup(backupData) {
             return false;
         }
         logDebug(`步骤 3: 新聊天ID: ${newChatId}`);
-        // ... (上下文验证保持不变) ...
+        // 上下文验证可以简化或移除，因为后续会强制切换回来
 
         // --- 步骤 4: 准备聊天内容和元数据 ---
         // (保持不变)
@@ -724,7 +760,7 @@ async function restoreBackup(backupData) {
         logDebug(`步骤 4: 准备完成, 消息数: ${chatToSave.length}, 元数据:`, metadataToSave);
 
         // --- 步骤 5: 保存恢复的数据到新聊天文件 ---
-        // (保持不变，但需要注意全局状态修改)
+        // (保持不变，临时修改全局状态以保存)
         logDebug(`步骤 5: 临时替换全局 chat 和 metadata 以便保存...`);
         let globalContext = getContext();
         let originalGlobalChat = globalContext.chat.slice();
@@ -754,36 +790,37 @@ async function restoreBackup(backupData) {
              logDebug('步骤 5: 全局 chat 和 metadata 已恢复到保存前状态');
         }
 
-        // --- 步骤 6: 强制重新加载并渲染 ---
-        logDebug('步骤 6: 开始强制重新加载并渲染...');
+        // --- 步骤 6: 强制重加载 - 通过关闭再打开 ---
+        logDebug('步骤 6: 开始强制重加载流程 (关闭再打开)...');
         try {
-            // 手动清空 UI 和内存 chat 数组
-            logDebug("步骤 6a: 清空聊天UI (#chat)");
-            $('#chat').children().remove();
-            logDebug("步骤 6b: 清空内存 chat 数组");
-            getContext().chat.length = 0; // 直接修改全局状态
-
-            // 触发 SillyTavern 重新获取并渲染
-            if (isGroup) {
-                logDebug(`步骤 6c: 调用 select_group_chats(${entityId}) 重新加载群组聊天`);
-                await select_group_chats(entityId); // 这应该会触发内部的 getGroupChat 和 printMessages
+            // 6a: 触发关闭聊天
+            logDebug("步骤 6a: 触发 '关闭聊天' (模拟点击 #option_close_chat)");
+            const closeButton = document.getElementById('option_close_chat');
+            if (closeButton) {
+                closeButton.click();
             } else {
-                logDebug("步骤 6c: 调用 getChat() 重新加载角色聊天");
-                await getChat(); // 调用导出的 getChat 函数，它会处理获取和渲染
+                console.warn("未能找到 #option_close_chat 按钮来触发关闭");
+                // 如果找不到按钮，可能需要其他方式，但点击通常是最直接的
             }
-            await new Promise(resolve => setTimeout(resolve, 800)); // 等待渲染完成
+            await new Promise(resolve => setTimeout(resolve, 800)); // 等待关闭动画和状态更新
 
-            // 刷新按钮状态
-            hideSwipeButtons();
-            showSwipeButtons();
-            logDebug('步骤 6: 强制重新加载和渲染完成');
+            // 6b: 触发重新选择目标实体
+            logDebug(`步骤 6b: 重新选择目标 ${entityToRestore.isGroup ? '群组' : '角色'} ID: ${entityToRestore.id}`);
+            if (entityToRestore.isGroup) {
+                await select_group_chats(entityToRestore.id);
+            } else {
+                await selectCharacterById(entityToRestore.charIndex, { switchMenu: false });
+            }
+            await new Promise(resolve => setTimeout(resolve, 1000)); // 等待加载和渲染完成
+
+            logDebug('步骤 6: 关闭再打开流程完成，UI应已正确加载');
         } catch (reloadError) {
-            console.error('[聊天自动备份] 步骤 6 失败: 强制重新加载或渲染出错:', reloadError);
+            console.error('[聊天自动备份] 步骤 6 失败: 关闭或重新打开聊天时出错:', reloadError);
             toastr.error('重新加载恢复的聊天内容失败，请尝试手动切换聊天。数据已保存。');
         }
 
         // --- 步骤 7: 触发事件 ---
-        // (保持不变)
+        // (保持不变，但现在上下文应该是正确的)
         logDebug('步骤 7: 触发 CHAT_CHANGED 事件...');
         const finalContext = getContext();
         eventSource.emit(event_types.CHAT_CHANGED, finalContext.chatId);
