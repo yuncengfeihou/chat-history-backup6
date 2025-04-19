@@ -548,10 +548,6 @@ async function executeBackupLogic(settings) {
         // --- 清理逻辑结束 ---
 
         // 8. UI提示
-        if (settings.debug) {
-            // 只有成功保存了新备份才提示
-            toastr.info(`已备份聊天: ${entityName} (${lastMsgIndex + 1}条消息)`, '聊天自动备份');
-        }
         logDebug(`成功完成聊天备份及可能的清理: ${entityName} - ${chatName}`);
 
         return true; // 表示备份成功（或已跳过但无错误）
@@ -806,7 +802,6 @@ async function restoreBackup(backupData) {
 
         // --- 结束 ---
         console.log('[聊天自动备份] 恢复流程完成');
-        toastr.success('聊天记录已成功恢复到新聊天');
         return true;
 
     } catch (error) {
